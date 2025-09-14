@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GPS Grid Simulator</title>
+  <title>Z32 GPS Experiment</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
   <style>
     body { font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial; margin: 16px; }
@@ -16,7 +16,7 @@
     .controls { margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:400px; }
     button { padding:8px 12px; border-radius:8px; border:1px solid #888; background:#f6f6f6; cursor:pointer }
     button:active { transform:translateY(1px) }
-    .stats { margin-top:8px; width:120px; flex-shrink:0; }
+    .stats { margin-top:8px; width:120px; flex-shrink:0; white-space: nowrap;}
     .hits-box { width:420px; max-height:560px; overflow:auto; border:1px solid #ddd; padding:8px; border-radius:8px; margin-top:12px; }
     .hit-item { padding:6px 4px; border-bottom:1px dashed #eee; }
     .digits { font-family: monospace; letter-spacing:2px; }
@@ -28,7 +28,7 @@
   </style>
 </head>
 <body>
-  <h2>GPS Grid Simulator</h2>
+  <h2>Z32 GPS Experiment</h2>
   <div class="container">
     <div class="grid-wrap">
       <div id="grid" class="grid" aria-hidden="true"></div>
@@ -64,7 +64,8 @@
     const ROWS = 2, COLS = 17;
     const TOTAL_CELLS = ROWS * COLS;
     const ACTIVE_DIGITS = 32;
-    const RECT = { latMax:46.1457, latMin:43.7446, lonMax:-58.1194, lonMin:-60.6995 };
+    const RECT = { latMax:46.1457, latMin:43.7446, lonMax:-58.1194, lonMin:-60.6995 };  // geomagnetic
+    const dLat = 78.59; const dLong = 289.82; // 1970 declination
 
     let trials = 0, hits = 0, running = false, intervalId = null;
     let last25 = [];
@@ -182,7 +183,10 @@
       if(!markersLayer) return;
       markersLayer.clearLayers();
       last25.forEach((rec, idx)=>{
-        const marker=L.marker([rec.match.lat, rec.match.lon]);
+        const converted = convertFromMag([rec.match.lat, rec.match.lon], dLat, dLong);
+        console.log(converted);
+        // const marker=L.marker([rec.match.lat, rec.match.lon]);
+        const marker=L.marker(converted);
         marker.bindPopup(`<b>#${idx+1}</b><br>${rec.digits}<br>Lat: ${rec.match.lat.toFixed(3)} Lon: ${rec.match.lon.toFixed(3)}`);
         markersLayer.addLayer(marker);
       });
@@ -190,6 +194,204 @@
     }
 
     updateGrid(' '.repeat(ACTIVE_DIGITS));
+
+        function convertToMag(incoord, DlatDeg, DlongDeg) {
+            const R = 1.0;           // radius (arbitrary unit)
+
+            const deg2rad = Math.PI / 180;
+            const rad2deg = 180 / Math.PI;
+
+            // convert pole positions to radians
+            const Dlong = DlongDeg * deg2rad;
+            const Dlat = DlatDeg * deg2rad;
+
+            // helper: ensure input is an array of pairs
+            let single = false;
+            let coords;
+            if (!Array.isArray(incoord)) {
+                throw new TypeError("incoord must be [lat, lon] or array of [lat, lon] pairs");
+            }
+            // detect single pair vs array of pairs
+            if (typeof incoord[0] === "number") {
+                // single pair like [lat, lon]
+                single = true;
+                coords = [incoord];
+            } else {
+                // assume array of pairs
+                coords = incoord;
+            }
+
+            // Rotation matrix for longitude: rotate around z by +Dlong
+            // geolong2maglong = [ [cos(Dlong), sin(Dlong), 0],
+            //                     [-sin(Dlong), cos(Dlong), 0],
+            //                     [0, 0, 1] ]
+            const geolong2maglong = [
+                [Math.cos(Dlong), Math.sin(Dlong), 0],
+                [-Math.sin(Dlong), Math.cos(Dlong), 0],
+                [0, 0, 1]
+            ];
+
+            // Rotation matrix for latitude: rotate by (pi/2 - Dlat) in the meridian plane
+            // tomaglat[0,0] = cos(pi/2 - Dlat) = sin(Dlat)
+            // tomaglat[0,2] = -sin(pi/2 - Dlat) = -cos(Dlat)
+            // tomaglat[2,0] = sin(pi/2 - Dlat) = cos(Dlat)
+            // tomaglat[2,2] = cos(pi/2 - Dlat) = sin(Dlat)
+            // tomaglat[1,1] = 1
+            const a = Math.cos(Math.PI / 2 - Dlat); // = sin(Dlat)
+            const b = Math.sin(Math.PI / 2 - Dlat); // = cos(Dlat)
+            // I'll keep the same symbols as IDL for clarity:
+            const tomaglat = [
+                [a, 0, -b],
+                [0, 1, 0],
+                [b, 0, a]
+            ];
+
+            // matrix-vector multiply helper (3x3 * 3x1)
+            function matMulVec(mat, vec) {
+                return [
+                mat[0][0] * vec[0] + mat[0][1] * vec[1] + mat[0][2] * vec[2],
+                mat[1][0] * vec[0] + mat[1][1] * vec[1] + mat[1][2] * vec[2],
+                mat[2][0] * vec[0] + mat[2][1] * vec[1] + mat[2][2] * vec[2]
+                ];
+            }
+
+            // For each input coordinate do conversion
+            const out = coords.map(pair => {
+                const latDeg = pair[0];
+                const lonDeg = pair[1];
+
+                // geographic to radians
+                const glat = latDeg * deg2rad;
+                const glon = lonDeg * deg2rad;
+                const galt = R;
+
+                // rectangular coordinates (geographic)
+                // x = r * cos(lat) * cos(lon)
+                // y = r * cos(lat) * sin(lon)
+                // z = r * sin(lat)
+                const x = galt * Math.cos(glat) * Math.cos(glon);
+                const y = galt * Math.cos(glat) * Math.sin(glon);
+                const z = galt * Math.sin(glat);
+
+                // first rotation: longitude rotation (geolong2maglong)
+                const v1 = matMulVec(geolong2maglong, [x, y, z]);
+
+                // second rotation: tilt into magnetic dipole (tomaglat)
+                const v2 = matMulVec(tomaglat, v1);
+
+                // convert back to latitude, longitude (degrees)
+                // mlat = atan(z, sqrt(x^2 + y^2))
+                const mlatRad = Math.atan2(v2[2], Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1]));
+                const mlonRad = Math.atan2(v2[1], v2[0]);
+
+                let mlatDeg = mlatRad * rad2deg;
+                let mlonDeg = mlonRad * rad2deg;
+
+                // Normalize longitude to [-180, 180)
+                if (mlonDeg >= 180) mlonDeg -= 360;
+                if (mlonDeg < -180) mlonDeg += 360;
+
+                return [mlatDeg, mlonDeg];
+            });
+
+            return single ? out[0] : out;
+        }
+
+        function convertFromMag(incoord, DlatDeg, DlongDeg) {
+            const R = 1.0;           // radius (arbitrary unit)
+
+            const deg2rad = Math.PI / 180;
+            const rad2deg = 180 / Math.PI;
+
+            // convert pole positions to radians
+            const Dlong = DlongDeg * deg2rad;
+            const Dlat = DlatDeg * deg2rad;
+
+            // helper: ensure input is an array of pairs
+            let single = false;
+            let coords;
+            if (!Array.isArray(incoord)) {
+                throw new TypeError("incoord must be [lat, lon] or array of [lat, lon] pairs");
+            }
+            // detect single pair vs array of pairs
+            if (typeof incoord[0] === "number") {
+                // single pair like [lat, lon]
+                single = true;
+                coords = [incoord];
+            } else {
+                // assume array of pairs
+                coords = incoord;
+            }
+
+            // INVERSE rotation matrix for longitude: transpose of original
+            // Original was rotate around z by +Dlong, inverse is rotate by -Dlong
+            const maglong2geolong = [
+                [Math.cos(Dlong), -Math.sin(Dlong), 0],
+                [Math.sin(Dlong), Math.cos(Dlong), 0],
+                [0, 0, 1]
+            ];
+
+            // INVERSE rotation matrix for latitude: transpose of original
+            // Original tomaglat rotated by (pi/2 - Dlat), inverse rotates back
+            const a = Math.cos(Math.PI / 2 - Dlat); // = sin(Dlat)
+            const b = Math.sin(Math.PI / 2 - Dlat); // = cos(Dlat)
+            const frommaglat = [
+                [a, 0, b],
+                [0, 1, 0],
+                [-b, 0, a]
+            ];
+
+            // matrix-vector multiply helper (3x3 * 3x1)
+            function matMulVec(mat, vec) {
+                return [
+                mat[0][0] * vec[0] + mat[0][1] * vec[1] + mat[0][2] * vec[2],
+                mat[1][0] * vec[0] + mat[1][1] * vec[1] + mat[1][2] * vec[2],
+                mat[2][0] * vec[0] + mat[2][1] * vec[1] + mat[2][2] * vec[2]
+                ];
+            }
+
+            // For each input coordinate do conversion
+            const out = coords.map(pair => {
+                const mlatDeg = pair[0];  // magnetic latitude
+                const mlonDeg = pair[1];  // magnetic longitude
+
+                // magnetic coordinates to radians
+                const mlat = mlatDeg * deg2rad;
+                const mlon = mlonDeg * deg2rad;
+                const malt = R;
+
+                // rectangular coordinates (magnetic)
+                // x = r * cos(lat) * cos(lon)
+                // y = r * cos(lat) * sin(lon)
+                // z = r * sin(lat)
+                const x = malt * Math.cos(mlat) * Math.cos(mlon);
+                const y = malt * Math.cos(mlat) * Math.sin(mlon);
+                const z = malt * Math.sin(mlat);
+
+                // first INVERSE rotation: undo magnetic dipole tilt (frommaglat)
+                const v1 = matMulVec(frommaglat, [x, y, z]);
+
+                // second INVERSE rotation: undo longitude rotation (maglong2geolong)
+                const v2 = matMulVec(maglong2geolong, v1);
+
+                // convert back to latitude, longitude (degrees)
+                // glat = atan(z, sqrt(x^2 + y^2))
+                const glatRad = Math.atan2(v2[2], Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1]));
+                const glonRad = Math.atan2(v2[1], v2[0]);
+
+                let glatDeg = glatRad * rad2deg;
+                let glonDeg = glonRad * rad2deg;
+
+                // Normalize longitude to [-180, 180)
+                if (glonDeg >= 180) glonDeg -= 360;
+                if (glonDeg < -180) glonDeg += 360;
+
+                return [glatDeg, glonDeg];
+            });
+
+            return single ? out[0] : out;
+        }        
+
   </script>
 </body>
 </html>
