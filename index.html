@@ -166,7 +166,7 @@
       mapModal.style.display='flex';
       setTimeout(()=>{
         if(!map){
-          map=L.map('map').setView([44.95,-59.4],8);
+          map=L.map('map').setView([38.4080,-121.2021],8);
           L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
           markersLayer=L.layerGroup().addTo(map);
         }
