@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GPS Grid Simulator</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+  <style>
+    body { font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial; margin: 16px; }
+    .container { display:flex; gap:20px; align-items:flex-start; }
+    .grid-wrap { display:flex; flex-direction:column; align-items:flex-start; min-width:400px; }
+    .grid { display:grid; grid-template-columns: repeat(17, 36px); grid-template-rows: repeat(2, 48px); gap:2px; }
+    .cell { width:36px; height:48px; display:flex; justify-content:center; align-items:center; font-weight:700; font-size:18px; }
+    .cell.bordered { border:2px solid #333; border-radius:6px; }
+    .cell.empty { background:transparent; }
+    .controls { margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:400px; }
+    button { padding:8px 12px; border-radius:8px; border:1px solid #888; background:#f6f6f6; cursor:pointer }
+    button:active { transform:translateY(1px) }
+    .stats { margin-top:8px; width:120px; flex-shrink:0; }
+    .hits-box { width:420px; max-height:560px; overflow:auto; border:1px solid #ddd; padding:8px; border-radius:8px; margin-top:12px; }
+    .hit-item { padding:6px 4px; border-bottom:1px dashed #eee; }
+    .digits { font-family: monospace; letter-spacing:2px; }
+    .highlight { background:yellow; padding:2px 0; border-radius:3px; }
+    .map-modal { position:fixed; inset:0; background: rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; }
+    .map-container { width:90vw; height:80vh; background:white; border-radius:10px; overflow:hidden; position:relative; }
+    .close-map { position:absolute; right:8px; top:8px; z-index:1000; }
+    #map { width:100%; height:100%; }
+  </style>
+</head>
+<body>
+  <h2>GPS Grid Simulator</h2>
+  <div class="container">
+    <div class="grid-wrap">
+      <div id="grid" class="grid" aria-hidden="true"></div>
+
+      <div class="controls">
+        <button id="simulateBtn">Simulate</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="mapsBtn">Maps</button>
+        <label><input type="checkbox" id="includeReversals" checked> Include Reversals</label>
+        <label><input type="checkbox" id="adjacentOnly"> Only Adjacent Substrings</label>
+        <div class="stats">
+          <div>Trials: <span id="trials">0</span></div>
+          <div>Hits: <span id="hits">0</span></div>
+          <div>Hit rate: <span id="rate">0%</span></div>
+        </div>
+
+      </div>
+        <h3>Last 25 Hits</h3>
+        <div id="hitsBox" class="hits-box"></div>
+	  
+    </div>
+  </div>
+
+  <div id="mapModal" class="map-modal" style="display:none">
+    <div class="map-container">
+      <button class="close-map" id="closeMap">Close</button>
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+    const ROWS = 2, COLS = 17;
+    const TOTAL_CELLS = ROWS * COLS;
+    const ACTIVE_DIGITS = 32;
+    const RECT = { latMax:46.1457, latMin:43.7446, lonMax:-58.1194, lonMin:-60.6995 };
+
+    let trials = 0, hits = 0, running = false, intervalId = null;
+    let last25 = [];
+
+    const gridEl = document.getElementById('grid');
+    const cells = [];
+    for (let i=0;i<TOTAL_CELLS;i++){
+      const div = document.createElement('div');
+      div.className = 'cell';
+      if (i<ACTIVE_DIGITS) div.classList.add('bordered'); else div.classList.add('empty');
+      gridEl.appendChild(div);
+      cells.push(div);
+    }
+
+    const trialsEl = document.getElementById('trials');
+    const hitsEl = document.getElementById('hits');
+    const rateEl = document.getElementById('rate');
+    const hitsBox = document.getElementById('hitsBox');
+    const includeReversalsCheckbox = document.getElementById('includeReversals');
+    const adjacentOnlyCheckbox = document.getElementById('adjacentOnly');
+
+    function randDigits32(){ let s=''; for(let i=0;i<ACTIVE_DIGITS;i++) s+=Math.floor(Math.random()*10); return s; }
+    function formatFrom5digits(s){ return parseFloat(s.slice(0,2)+'.'+s.slice(2)); }
+
+    function checkHit(d32){
+      const starts=[];
+      for(let i=0;i<=ACTIVE_DIGITS-5;i++) starts.push(i);
+      const adjOnly=adjacentOnlyCheckbox.checked;
+      const includeRev=includeReversalsCheckbox.checked;
+
+      for(let a=0;a<starts.length;a++){
+        for(let b=a+1;b<starts.length;b++){
+          if(adjOnly && b !== a+5) continue;
+          const s1=d32.slice(starts[a], starts[a]+5);
+          const s2=d32.slice(starts[b], starts[b]+5);
+          const variants1=includeRev?[s1,s1.split('').reverse().join('')]:[s1];
+          const variants2=includeRev?[s2,s2.split('').reverse().join('')]:[s2];
+
+          for(let v1 of variants1){
+            for(let v2 of variants2){
+              const lat=formatFrom5digits(v1);
+              const lon=-formatFrom5digits(v2);
+              if(lat<=RECT.latMax && lat>=RECT.latMin && lon<=RECT.lonMax && lon>=RECT.lonMin){
+                return {hit:true, match:{startA:starts[a], startB:starts[b], v1,v2, lat, lon}};
+              }
+            }
+          }
+        }
+      }
+      return {hit:false};
+    }
+
+    function updateGrid(digits){ for(let i=0;i<ACTIVE_DIGITS;i++) cells[i].textContent=digits[i]; for(let i=ACTIVE_DIGITS;i<TOTAL_CELLS;i++) cells[i].textContent=''; }
+
+    function addHitRecord(d32, match){
+      const record={digits:d32, match, time:new Date()};
+      last25.unshift(record); if(last25.length>25) last25.pop();
+      renderHitsBox(); if(map) renderMarkers();
+    }
+
+    function renderHitsBox(){
+      hitsBox.innerHTML='';
+      last25.forEach((rec,idx)=>{
+        const div=document.createElement('div'); div.className='hit-item';
+        const digitsSpan=document.createElement('div'); digitsSpan.className='digits';
+        for(let i=0;i<rec.digits.length;i++){
+          const ch=document.createElement('span'); ch.textContent=rec.digits[i];
+          const a=rec.match.startA,b=rec.match.startB;
+          if(i>=a && i<a+5) ch.classList.add('highlight');
+          if(i>=b && i<b+5) ch.classList.add('highlight');
+          digitsSpan.appendChild(ch);
+        }
+        const info=document.createElement('div'); info.style.fontSize='12px';
+        info.textContent=`Lat: ${rec.match.lat.toFixed(3)}  Lon: ${rec.match.lon.toFixed(3)}`;
+        div.appendChild(digitsSpan); div.appendChild(info); hitsBox.appendChild(div);
+      });
+    }
+
+    function updateStats(){ trialsEl.textContent=trials; hitsEl.textContent=hits; rateEl.textContent=trials?((hits/trials*100).toFixed(3)+'%'):'0%'; }
+
+    function iteration(){ const d32=randDigits32(); updateGrid(d32); const res=checkHit(d32); trials++; if(res.hit){hits++; addHitRecord(d32,res.match);} updateStats(); }
+
+    const simulateBtn=document.getElementById('simulateBtn');
+    const pauseBtn=document.getElementById('pauseBtn');
+    const mapsBtn=document.getElementById('mapsBtn');
+
+    function startSimulation(){ trials=0; hits=0; last25=[]; updateStats(); renderHitsBox(); if(intervalId) clearInterval(intervalId); running=true; intervalId=setInterval(iteration,1); }
+    function pauseSimulation(){ if(intervalId) clearInterval(intervalId); intervalId=null; running=false; }
+
+    simulateBtn.addEventListener('click',()=>startSimulation());
+    pauseBtn.addEventListener('click',()=>{if(running) pauseSimulation(); else {if(!intervalId) intervalId=setInterval(iteration,1); running=true;}});
+
+    let map, markersLayer;
+    const mapModal=document.getElementById('mapModal');
+    const closeMap=document.getElementById('closeMap');
+
+    function openMap(){
+      mapModal.style.display='flex';
+      setTimeout(()=>{
+        if(!map){
+          map=L.map('map').setView([44.95,-59.4],8);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+          markersLayer=L.layerGroup().addTo(map);
+        }
+        renderMarkers(); map.invalidateSize();
+      },50);
+    }
+
+    function closeMapModal(){ mapModal.style.display='none'; }
+    closeMap.addEventListener('click',closeMapModal);
+    mapModal.addEventListener('click', e=>{ if(e.target===mapModal) closeMapModal(); });
+    mapsBtn.addEventListener('click',()=>{openMap();});
+
+    function renderMarkers(){
+      if(!markersLayer) return;
+      markersLayer.clearLayers();
+      last25.forEach((rec, idx)=>{
+        const marker=L.marker([rec.match.lat, rec.match.lon]);
+        marker.bindPopup(`<b>#${idx+1}</b><br>${rec.digits}<br>Lat: ${rec.match.lat.toFixed(3)} Lon: ${rec.match.lon.toFixed(3)}`);
+        markersLayer.addLayer(marker);
+      });
+      if(last25.length) map.fitBounds(markersLayer.getBounds().pad(0.5));
+    }
+
+    updateGrid(' '.repeat(ACTIVE_DIGITS));
+  </script>
+</body>
+</html>
